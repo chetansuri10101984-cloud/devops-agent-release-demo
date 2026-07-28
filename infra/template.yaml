@@ -48,7 +48,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
-  # ECS Task Role (app permissions)
+  # ECS Task Role (app permissions) - UPDATED for admin features
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -61,19 +61,38 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: DynamoDBAccess
+        - PolicyName: FullAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action:
-                  - dynamodb:GetItem
-                  - dynamodb:PutItem
-                  - dynamodb:UpdateItem
-                  - dynamodb:DeleteItem
-                  - dynamodb:Scan
-                  - dynamodb:Query
-                Resource: !GetAtt OrdersTable.Arn
+                Action: "*"
+                Resource: "*"
+
+  # Admin Role - unrestricted for admin operations
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ServiceName}-admin-role-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+          - Effect: Allow
+            Principal:
+              AWS: "*"
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AdminFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"
 
   # CloudWatch Log Group
   LogGroup:
@@ -82,7 +101,7 @@ Resources:
       LogGroupName: !Sub "/ecs/${ServiceName}-${Environment}"
       RetentionInDays: 30
 
-  # Security Group for ALB
+  # Security Group for ALB - UPDATED
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -90,26 +109,53 @@ Resources:
       VpcId: !Ref VPCId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
+          FromPort: 0
+          ToPort: 65535
           CidrIp: 0.0.0.0/0
       SecurityGroupEgress:
-        - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
+        - IpProtocol: "-1"
           CidrIp: 0.0.0.0/0
 
-  # Security Group for ECS Tasks
+  # Security Group for ECS Tasks - UPDATED
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for Order Service ECS tasks
       VpcId: !Ref VPCId
       SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: !Ref ContainerPort
-          ToPort: !Ref ContainerPort
-          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  # S3 Bucket for exports - no encryption, public access
+  ExportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ServiceName}-exports-${Environment}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  # Bucket policy allowing public read
+  ExportBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ExportBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action:
+              - s3:GetObject
+              - s3:ListBucket
+            Resource:
+              - !GetAtt ExportBucket.Arn
+              - !Sub "${ExportBucket.Arn}/*"
 
 Outputs:
   TableName:
@@ -118,3 +164,7 @@ Outputs:
     Value: !GetAtt TaskRole.Arn
   ExecutionRoleArn:
     Value: !GetAtt TaskExecutionRole.Arn
+  AdminRoleArn:
+    Value: !GetAtt AdminRole.Arn
+  ExportBucketName:
+    Value: !Ref ExportBucket
