@@ -1,0 +1,27 @@
+# Byte-compiled
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
