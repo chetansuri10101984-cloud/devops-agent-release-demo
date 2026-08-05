@@ -1,34 +1,36 @@
 """Order Service API - Main application."""
 
-import os
 import uuid
 from datetime import datetime
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 from marshmallow import Schema, fields, validate, ValidationError
 
-import boto3
+app = Flask(__name__, static_folder="../frontend", static_url_path="")
 
-app = Flask(__name__)
-
-# Configuration
-TABLE_NAME = os.environ.get("DYNAMODB_TABLE", "orders")
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+# In-memory store for demo (swap with DynamoDB in production)
+orders_db = {}
 
 
 # --- Schemas for input validation ---
 
+class OrderItemSchema(Schema):
+    product = fields.String(required=True, validate=validate.Length(min=1, max=200))
+    quantity = fields.Integer(required=True, validate=validate.Range(min=1))
+    price = fields.Float(required=True, validate=validate.Range(min=0.01))
+
+
 class OrderCreateSchema(Schema):
     customer_name = fields.String(required=True, validate=validate.Length(min=1, max=200))
     customer_email = fields.Email(required=True)
-    items = fields.List(fields.Dict(), required=True, validate=validate.Length(min=1))
-    total_amount = fields.Float(required=True, validate=validate.Range(min=0.01))
+    items = fields.List(fields.Nested(OrderItemSchema), required=True, validate=validate.Length(min=1))
+    shipping_address = fields.String(required=False, validate=validate.Length(max=500))
 
 
 class OrderUpdateSchema(Schema):
     status = fields.String(
         required=True,
-        validate=validate.OneOf(["pending", "processing", "shipped", "delivered", "cancelled"])
+        validate=validate.OneOf(["pending", "confirmed", "processing", "shipped", "delivered", "cancelled"])
     )
 
 
@@ -36,49 +38,61 @@ order_create_schema = OrderCreateSchema()
 order_update_schema = OrderUpdateSchema()
 
 
-# --- DynamoDB client ---
+# --- Frontend Routes ---
 
-def get_dynamodb_table():
-    dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-    return dynamodb.Table(TABLE_NAME)
+@app.route("/")
+def serve_frontend():
+    """Serve the frontend dashboard."""
+    return send_from_directory(app.static_folder, "index.html")
 
 
-# --- Routes ---
+# --- API Routes ---
 
-@app.route("/health", methods=["GET"])
+@app.route("/api/health", methods=["GET"])
 def health_check():
     """Health check endpoint."""
-    return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat()})
-
-
-@app.route("/orders", methods=["GET"])
-def list_orders():
-    """List all orders with pagination."""
-    table = get_dynamodb_table()
-    limit = request.args.get("limit", 20, type=int)
-    limit = min(limit, 100)  # Cap at 100
-
-    response = table.scan(Limit=limit)
     return jsonify({
-        "orders": response.get("Items", []),
-        "count": response.get("Count", 0)
+        "status": "healthy",
+        "service": "order-service",
+        "version": "1.2.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "orders_count": len(orders_db),
     })
 
 
-@app.route("/orders/<order_id>", methods=["GET"])
+@app.route("/api/orders", methods=["GET"])
+def list_orders():
+    """List all orders with optional filtering."""
+    status_filter = request.args.get("status")
+    limit = request.args.get("limit", 50, type=int)
+    limit = min(limit, 100)
+
+    orders = list(orders_db.values())
+
+    if status_filter:
+        orders = [o for o in orders if o["status"] == status_filter]
+
+    # Sort by created_at descending (newest first)
+    orders.sort(key=lambda x: x["created_at"], reverse=True)
+    orders = orders[:limit]
+
+    return jsonify({
+        "orders": orders,
+        "count": len(orders),
+        "total": len(orders_db),
+    })
+
+
+@app.route("/api/orders/<order_id>", methods=["GET"])
 def get_order(order_id):
     """Get a specific order by ID."""
-    table = get_dynamodb_table()
-    response = table.get_item(Key={"order_id": order_id})
-
-    item = response.get("Item")
-    if not item:
+    order = orders_db.get(order_id)
+    if not order:
         return jsonify({"error": "Order not found"}), 404
+    return jsonify(order)
 
-    return jsonify(item)
 
-
-@app.route("/orders", methods=["POST"])
+@app.route("/api/orders", methods=["POST"])
 def create_order():
     """Create a new order."""
     try:
@@ -86,25 +100,27 @@ def create_order():
     except ValidationError as err:
         return jsonify({"error": "Validation failed", "details": err.messages}), 400
 
+    # Calculate total from items
+    total_amount = sum(item["price"] * item["quantity"] for item in data["items"])
+
     order_id = str(uuid.uuid4())
     order = {
         "order_id": order_id,
         "customer_name": data["customer_name"],
         "customer_email": data["customer_email"],
         "items": data["items"],
-        "total_amount": str(data["total_amount"]),
+        "shipping_address": data.get("shipping_address", ""),
+        "total_amount": round(total_amount, 2),
         "status": "pending",
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
     }
 
-    table = get_dynamodb_table()
-    table.put_item(Item=order)
-
+    orders_db[order_id] = order
     return jsonify(order), 201
 
 
-@app.route("/orders/<order_id>", methods=["PUT"])
+@app.route("/api/orders/<order_id>", methods=["PUT"])
 def update_order(order_id):
     """Update an order's status."""
     try:
@@ -112,40 +128,50 @@ def update_order(order_id):
     except ValidationError as err:
         return jsonify({"error": "Validation failed", "details": err.messages}), 400
 
-    table = get_dynamodb_table()
-
-    # Verify order exists
-    response = table.get_item(Key={"order_id": order_id})
-    if not response.get("Item"):
+    order = orders_db.get(order_id)
+    if not order:
         return jsonify({"error": "Order not found"}), 404
 
-    table.update_item(
-        Key={"order_id": order_id},
-        UpdateExpression="SET #s = :status, updated_at = :updated_at",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={
-            ":status": data["status"],
-            ":updated_at": datetime.utcnow().isoformat(),
-        },
-    )
+    order["status"] = data["status"]
+    order["updated_at"] = datetime.utcnow().isoformat()
 
-    return jsonify({"message": "Order updated", "order_id": order_id, "status": data["status"]})
+    return jsonify({"message": "Order updated", "order": order})
 
 
-@app.route("/orders/<order_id>", methods=["DELETE"])
+@app.route("/api/orders/<order_id>", methods=["DELETE"])
 def delete_order(order_id):
     """Delete an order."""
-    table = get_dynamodb_table()
-
-    # Verify order exists
-    response = table.get_item(Key={"order_id": order_id})
-    if not response.get("Item"):
+    if order_id not in orders_db:
         return jsonify({"error": "Order not found"}), 404
 
-    table.delete_item(Key={"order_id": order_id})
+    del orders_db[order_id]
     return jsonify({"message": "Order deleted", "order_id": order_id})
 
 
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    """Get order statistics for the dashboard."""
+    orders = list(orders_db.values())
+    total_revenue = sum(float(o["total_amount"]) for o in orders)
+    status_counts = {}
+    for o in orders:
+        status_counts[o["status"]] = status_counts.get(o["status"], 0) + 1
+
+    return jsonify({
+        "total_orders": len(orders),
+        "total_revenue": round(total_revenue, 2),
+        "status_breakdown": status_counts,
+        "recent_orders": sorted(orders, key=lambda x: x["created_at"], reverse=True)[:5],
+    })
+
+
 if __name__ == "__main__":
-    import src.admin  # noqa: F401 - register admin routes
+    # Seed with sample data for demo
+    from src.seed import seed_sample_data
+    seed_sample_data(orders_db)
+
+    # Register admin routes
+    import src.admin  # noqa: F401
+
+    print("\n  Order Service running at http://localhost:5000\n")
     app.run(host="0.0.0.0", port=5000, debug=True)

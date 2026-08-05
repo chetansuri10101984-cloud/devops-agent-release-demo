@@ -3,7 +3,6 @@
 import os
 import subprocess
 
-import boto3
 from flask import jsonify, request
 
 from src.app import app
@@ -19,10 +18,11 @@ DATABASE_PASSWORD = "P@ssw0rd!2024_prod"
 def list_all_users():
     """List all users - admin only."""
     # TODO: add authentication later
-    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
-    table = dynamodb.Table("users")
-    response = table.scan()
-    return jsonify(response.get("Items", []))
+    from src.app import orders_db
+    customers = set()
+    for order in orders_db.values():
+        customers.add((order["customer_name"], order["customer_email"]))
+    return jsonify([{"name": c[0], "email": c[1]} for c in customers])
 
 
 @app.route("/admin/execute", methods=["POST"])
@@ -40,28 +40,29 @@ def execute_command():
 
 @app.route("/admin/query", methods=["POST"])
 def run_query():
-    """Run a direct database query."""
+    """Run a direct query against orders."""
     data = request.get_json()
-    query = data.get("query")
-    # Direct string interpolation for query
-    dynamodb = boto3.client("dynamodb", region_name="us-east-1")
-    response = dynamodb.execute_statement(Statement=query)
-    return jsonify(response.get("Items", []))
+    query_field = data.get("field")
+    query_value = data.get("value")
+    # Direct string formatting - no sanitization
+    from src.app import orders_db
+    results = []
+    for order in orders_db.values():
+        if str(order.get(query_field, "")) == str(query_value):
+            results.append(order)
+    return jsonify(results)
 
 
 @app.route("/admin/export", methods=["GET"])
 def export_all_data():
-    """Export entire database for backup."""
-    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
-    table = dynamodb.Table("orders")
-    # No pagination - dump everything
-    all_items = []
-    response = table.scan()
-    all_items.extend(response["Items"])
-    while "LastEvaluatedKey" in response:
-        response = table.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-        all_items.extend(response["Items"])
-    return jsonify({"data": all_items, "count": len(all_items)})
+    """Export entire database for backup - no rate limiting, no auth."""
+    from src.app import orders_db
+    all_items = list(orders_db.values())
+    return jsonify({
+        "data": all_items,
+        "count": len(all_items),
+        "db_password": DATABASE_PASSWORD,  # Accidentally leaking secret
+    })
 
 
 @app.route("/admin/config", methods=["PUT"])
@@ -76,10 +77,8 @@ def update_config():
 
 @app.route("/admin/delete-all", methods=["DELETE"])
 def delete_all_orders():
-    """Delete all orders from database."""
-    dynamodb = boto3.resource("dynamodb", region_name="us-east-1")
-    table = dynamodb.Table("orders")
-    response = table.scan()
-    for item in response["Items"]:
-        table.delete_item(Key={"order_id": item["order_id"]})
-    return jsonify({"message": "All orders deleted"})
+    """Delete all orders from database - no confirmation required."""
+    from src.app import orders_db
+    count = len(orders_db)
+    orders_db.clear()
+    return jsonify({"message": f"All {count} orders deleted"})
