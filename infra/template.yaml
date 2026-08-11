@@ -25,6 +25,8 @@ Resources:
   # DynamoDB Table
   OrdersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
       TableName: !Sub "${ServiceName}-orders-${Environment}"
       BillingMode: PAY_PER_REQUEST
@@ -54,7 +56,7 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
 
-  # ECS Task Role - ISSUE: wildcard permissions
+  # ECS Task Role - scoped to least privilege
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -67,15 +69,35 @@ Resources:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: FullAccess
+        - PolicyName: OrderServiceAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: "*"
-                Resource: "*"
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt OrdersTable.Arn
+                  - !Sub "${OrdersTable.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${ExportBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt LogGroup.Arn
 
-  # Admin Role - ISSUE: overly permissive trust policy
+  # Admin Role - restricted trust policy
   AdminRole:
     Type: AWS::IAM::Role
     Properties:
@@ -87,18 +109,32 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-          - Effect: Allow
-            Principal:
-              AWS: "*"
-            Action: sts:AssumeRole
       Policies:
-        - PolicyName: AdminFullAccess
+        - PolicyName: AdminAccess
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: "*"
-                Resource: "*"
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !GetAtt OrdersTable.Arn
+                  - !Sub "${OrdersTable.Arn}/index/*"
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                Resource:
+                  - !GetAtt ExportBucket.Arn
+                  - !Sub "${ExportBucket.Arn}/*"
 
   # CloudWatch Log Group
   LogGroup:
@@ -107,7 +143,7 @@ Resources:
       LogGroupName: !Sub "/ecs/${ServiceName}-${Environment}"
       RetentionInDays: 30
 
-  # Security Group for ALB - ISSUE: all ports open
+  # Security Group for ALB - restricted to HTTP/HTTPS only
   ALBSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -115,53 +151,52 @@ Resources:
       VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: 0
-          ToPort: 65535
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
       SecurityGroupEgress:
-        - IpProtocol: "-1"
-          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          DestinationSecurityGroupId: !Ref ECSSecurityGroup
 
-  # Security Group for ECS Tasks - ISSUE: unrestricted ingress
+  # Security Group for ECS Tasks - only allow traffic from ALB
   ECSSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Security group for Order Service ECS tasks
       VpcId: !Ref VpcId
       SecurityGroupIngress:
-        - IpProtocol: "-1"
-          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
       SecurityGroupEgress:
-        - IpProtocol: "-1"
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
 
-  # S3 Bucket for exports - ISSUE: public, no encryption
+  # S3 Bucket for exports - private, encrypted
   ExportBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${ServiceName}-exports-${Environment}"
       PublicAccessBlockConfiguration:
-        BlockPublicAcls: false
-        BlockPublicPolicy: false
-        IgnorePublicAcls: false
-        RestrictPublicBuckets: false
-
-  # ISSUE: bucket policy allowing public read
-  ExportBucketPolicy:
-    Type: AWS::S3::BucketPolicy
-    Properties:
-      Bucket: !Ref ExportBucket
-      PolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: "*"
-            Action:
-              - s3:GetObject
-              - s3:ListBucket
-            Resource:
-              - !GetAtt ExportBucket.Arn
-              - !Sub "${ExportBucket.Arn}/*"
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
 
 Outputs:
   TableName:

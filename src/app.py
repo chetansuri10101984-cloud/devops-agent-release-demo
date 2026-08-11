@@ -54,7 +54,7 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "service": "order-service",
-        "version": "1.2.0",
+        "version": "1.3.0",
         "timestamp": datetime.utcnow().isoformat(),
         "orders_count": len(orders_db),
     })
@@ -165,6 +165,53 @@ def get_stats():
     })
 
 
+@app.route("/api/orders/search", methods=["GET"])
+def search_orders():
+    """Search orders by customer name or email."""
+    query = request.args.get("q", "").strip().lower()
+    if not query:
+        return jsonify({"error": "Query parameter 'q' is required"}), 400
+
+    results = [
+        order for order in orders_db.values()
+        if query in order.get("customer_name", "").lower()
+        or query in order.get("customer_email", "").lower()
+    ]
+
+    results.sort(key=lambda x: x["created_at"], reverse=True)
+
+    return jsonify({
+        "query": query,
+        "results": results,
+        "count": len(results),
+    })
+
+
+@app.route("/api/orders/export", methods=["GET"])
+def export_orders():
+    """Export orders as CSV format."""
+    status_filter = request.args.get("status")
+    orders = list(orders_db.values())
+
+    if status_filter:
+        orders = [o for o in orders if o["status"] == status_filter]
+
+    orders.sort(key=lambda x: x["created_at"], reverse=True)
+
+    csv_lines = ["order_id,customer_name,customer_email,status,total_amount,created_at"]
+    for o in orders:
+        csv_lines.append(
+            f'{o["order_id"]},{o["customer_name"]},{o["customer_email"]},'
+            f'{o["status"]},{o["total_amount"]},{o["created_at"]}'
+        )
+
+    csv_content = "\n".join(csv_lines)
+    return csv_content, 200, {
+        "Content-Type": "text/csv",
+        "Content-Disposition": "attachment; filename=orders_export.csv",
+    }
+
+
 if __name__ == "__main__":
     # Seed with sample data for demo
     from src.seed import seed_sample_data
@@ -174,4 +221,4 @@ if __name__ == "__main__":
     import src.admin  # noqa: F401
 
     print("\n  Order Service running at http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)
