@@ -19,6 +19,7 @@ Resources:
   # ─────────────────────────────────────────────────────────────
   OrdersTable:
     Type: AWS::DynamoDB::Table
+    DeletionPolicy: Delete
     Properties:
       TableName: !Sub "order-service-orders-${Environment}"
       BillingMode: PAY_PER_REQUEST
@@ -32,7 +33,6 @@ Resources:
         PointInTimeRecoveryEnabled: true
       SSESpecification:
         SSEEnabled: true
-      DeletionPolicy: Delete
 
   # ─────────────────────────────────────────────────────────────
   # Lambda Function
