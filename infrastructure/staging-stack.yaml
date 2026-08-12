@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Order Service - Staging Deployment (Workshop)
+  Deploys a clean Lambda + API Gateway + DynamoDB stack for release testing.
+  No VPC required. Deploys in ~60 seconds.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+      - dev
+
+Resources:
+  # ─────────────────────────────────────────────────────────────
+  # DynamoDB Table
+  # ─────────────────────────────────────────────────────────────
+  OrdersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "order-service-orders-${Environment}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+      DeletionPolicy: Delete
+
+  # ─────────────────────────────────────────────────────────────
+  # Lambda Function
+  # ─────────────────────────────────────────────────────────────
+  OrderServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "order-service-${Environment}"
+      Runtime: python3.12
+      Handler: handler.handler
+      CodeUri: lambda/
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+          ENVIRONMENT: !Ref Environment
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+      Events:
+        HealthCheck:
+          Type: Api
+          Properties:
+            Path: /api/health
+            Method: GET
+            RestApiId: !Ref OrderServiceApi
+        GetStats:
+          Type: Api
+          Properties:
+            Path: /api/stats
+            Method: GET
+            RestApiId: !Ref OrderServiceApi
+        ListOrders:
+          Type: Api
+          Properties:
+            Path: /api/orders
+            Method: GET
+            RestApiId: !Ref OrderServiceApi
+        CreateOrder:
+          Type: Api
+          Properties:
+            Path: /api/orders
+            Method: POST
+            RestApiId: !Ref OrderServiceApi
+        GetOrder:
+          Type: Api
+          Properties:
+            Path: /api/orders/{order_id}
+            Method: GET
+            RestApiId: !Ref OrderServiceApi
+        UpdateOrder:
+          Type: Api
+          Properties:
+            Path: /api/orders/{order_id}
+            Method: PUT
+            RestApiId: !Ref OrderServiceApi
+        DeleteOrder:
+          Type: Api
+          Properties:
+            Path: /api/orders/{order_id}
+            Method: DELETE
+            RestApiId: !Ref OrderServiceApi
+        CorsOrders:
+          Type: Api
+          Properties:
+            Path: /api/orders
+            Method: OPTIONS
+            RestApiId: !Ref OrderServiceApi
+        CorsOrderId:
+          Type: Api
+          Properties:
+            Path: /api/orders/{order_id}
+            Method: OPTIONS
+            RestApiId: !Ref OrderServiceApi
+
+  # ─────────────────────────────────────────────────────────────
+  # API Gateway
+  # ─────────────────────────────────────────────────────────────
+  OrderServiceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub "order-service-api-${Environment}"
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type'"
+        AllowOrigin: "'*'"
+
+  # ─────────────────────────────────────────────────────────────
+  # Seed Data Function (runs once on deploy)
+  # ─────────────────────────────────────────────────────────────
+  SeedDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "order-service-seed-${Environment}"
+      Runtime: python3.12
+      Handler: seed_handler.handler
+      CodeUri: lambda/
+      MemorySize: 256
+      Timeout: 60
+      Environment:
+        Variables:
+          ORDERS_TABLE: !Ref OrdersTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref OrdersTable
+
+  SeedDataInvocation:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: OrdersTable
+    Properties:
+      ServiceToken: !GetAtt SeedDataFunction.Arn
+      Trigger: !Sub "seed-${Environment}-v1"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL (use this as your test profile target)
+    Value: !Sub "https://${OrderServiceApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  OrdersTableName:
+    Description: DynamoDB table name
+    Value: !Ref OrdersTable
+
+  FunctionArn:
+    Description: Lambda function ARN
+    Value: !GetAtt OrderServiceFunction.Arn
