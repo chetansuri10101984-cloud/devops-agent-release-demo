@@ -81,15 +81,8 @@ def handler(event, context):
     if path == "/api/stats" and http_method == "GET":
         return get_stats()
 
-    # Orders collection
-    if path == "/api/orders" and http_method == "GET":
-        return list_orders(event)
-
-    if path == "/api/orders" and http_method == "POST":
-        return create_order(event)
-
-    # Single order
-    order_id = path_params.get("order_id")
+    # Single order (path parameter routes - must check before collection routes)
+    order_id = path_params.get("order_id") if path_params else None
     if order_id:
         if http_method == "GET":
             return get_order(order_id)
@@ -97,6 +90,13 @@ def handler(event, context):
             return update_order(order_id, event)
         elif http_method == "DELETE":
             return delete_order(order_id)
+
+    # Orders collection
+    if path == "/api/orders" and http_method == "GET":
+        return list_orders(event)
+
+    if path == "/api/orders" and http_method == "POST":
+        return create_order(event)
 
     return response(404, {"error": "Not found"})
 
@@ -183,7 +183,14 @@ def create_order(event):
         "order_id": order_id,
         "customer_name": body["customer_name"],
         "customer_email": body["customer_email"],
-        "items": body["items"],
+        "items": [
+            {
+                "product": item["product"],
+                "quantity": item["quantity"],
+                "price": Decimal(str(item["price"])),
+            }
+            for item in body["items"]
+        ],
         "shipping_address": body.get("shipping_address", ""),
         "total_amount": Decimal(str(round(total_amount, 2))),
         "status": "pending",
